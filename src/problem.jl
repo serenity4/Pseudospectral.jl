@@ -4,9 +4,19 @@ struct Bounds
     ub
     
     function Bounds(lb, ub)
-        lengths = map(x -> first(size(x)), lb, ub)
-        lb = isnothing(lb) ? repeat([-Inf], lengths[1]) : lb
-        ub = isnothing(lb) ? repeat([Inf], lengths[2]) : ub
+        lb = isnothing(lb) ? () : lb
+        ub = isnothing(ub) ? () : ub
+
+        size(lb) == () && size(ub) == () && !isnothing(lb) && !isnothing(ub) && return new(lb, ub)
+        
+        sizes = map(x -> size(x), [lb, ub])
+        nonempty_bounds = findall(sizes .!= Ref(()))
+        @assert !isempty(nonempty_bounds)
+        length = sizes[nonempty_bounds[1]]
+        
+        lb = 1 in nonempty_bounds ? lb : repeat([-Inf], length)
+        ub = 2 in nonempty_bounds ? ub : repeat([-Inf], length)
+
         new(lb, ub)
     end
 end
@@ -19,12 +29,12 @@ abstract type PSProblem end
     cost
     x₀::AbstractArray{T}
     u₀::AbstractArray{T}
-    δ = 1e-6
-    state_bounds = Bounds(nothing, nothing)
-    control_bounds = Bounds(nothing, nothing)
+    δ
+    state_bounds
+    control_bounds
 end
 
-@with_kw mutable struct UnitializedProblem{T} <: PSProblem
+@with_kw mutable struct UninitializedProblem <: PSProblem
     dynamics
     path_constraints
     cost
@@ -34,68 +44,112 @@ end
     δ
     state_bounds::Bounds
     control_bounds::Bounds
-    end_points::Bounds
+    end_points
 end
 
 
 
-UnitializedProblem(prob::InitializedProblem) = UninitializedProblem(prob.dynamics, prob.path_constraints, prob.cost, size(prob.x₀)[1], size(prob.u₀)..., prob.δ, prob.end_points)
+UninitializedProblem(prob::InitializedProblem) = UninitializedProblem(prob.dynamics, prob.path_constraints, prob.cost, size(prob.x₀)[1], size(prob.u₀)..., prob.δ, prob.end_points)
 
-
-# function build_problem(prob::UninitializedProblem)
-#     n = prob.n
-#     τ, w = gausslobatto(n + 1)
-
-#     M = zeros(Float64, (n + 1, n + 1))
-#     diff_matrix!(M, n)
-
-#     x0, xf = prob.end_points
-#     xb = prob.state_bounds
-#     ub = prob.control_bounds
-
-
-#     θb = [-pi, pi]
-#     vb = [0, 2]
+function symbolic_to_str(symbolic_expr::Basic; extend_dims=true, interpolate_variables=false)
+    str_sym = string(symbolic_expr)
     
-#     model = Model(Ipopt.Optimizer)
+    # TODO: make it generic over variable names
+    regex_dims = r"(\w+)(\d)\[(\d+)\]"
+    regex_slice = r"([X|U]\[.*?\])"
+
+    if extend_dims
+        str_sym = replace(str_sym, regex_dims => s"\1[\2,\3]")
+    end
+    if interpolate_variables
+        str_sym = replace(str_sym, regex_slice => s"$(\1)")
+    end
+
+    str_sym
+end
+
+substitute_args(expr, vars) = expr
+substitute_args(expr::Symbol, vars) = get(vars, expr, expr)
+function substitute_args(expr::Expr, vars)
+    for (i, arg) in enumerate(expr.args)
+        if arg in keys(vars)
+            expr.args[i] = vars[arg]
+        else
+            expr.args[i] = substitute_args(arg, vars)
+        end
+    end
+    return expr
+end
+
+
+function ode_constraint_exprs(M, dynamics, n, δ, ns, nc)
+
+    function ode_error(dynamics, X, U)
+        X * M' .- dynamics(X, U)
+    end
     
-#     @variable model 0 <= x[1:2, 1:n + 1] <= 2 base_name = "position"
-#     # @variable model x[1:2, 1:n + 1] base_name = "position"
+    X_symbolic = zeros(Basic, (ns, n + 1))
+    U_symbolic = zeros(Basic, (nc, n + 1))
+    for (is, ic) in zip(1:ns, 1:nc), i in 1:n + 1
+        X_symbolic[is, i] = symbols("X$is[$i]")[1]
+        U_symbolic[ic, i] = symbols("U$ic[$i]")[1]
+    end
+
+    err = ode_error(dynamics, X_symbolic, U_symbolic)
+    strs = symbolic_to_str.(err; interpolate_variables=false)
+    strs .*= "≤ $δ"
     
-#     @variable model 0 <= θ[1:n + 1] <= 2pi base_name = "rotation angle"
-#     # @variable model 0 <= v[1:n + 1] base_name = "speed"
-#     @variable model vb[1] ≤ v[1:n + 1] ≤ vb[2] base_name = "speed"
-    
-#     @objective model Min cost(x, θ, v)
-    
-#     @constraint model collision 0 .<= path_constraints(x, θ, v)
-#     @constraint model initial_point x[:, 1] .== x0
-#     @constraint model end_point x[:, end] .== xf
+    Meta.parse.(strs)
+end
+
+function build_problem(prob::UninitializedProblem)
+    n = prob.n
+    τ, w = gausslobatto(n + 1)
+
+    M = zeros(Float64, (n + 1, n + 1))
+    diff_matrix!(M, n)
+
+    xb = prob.state_bounds
+    ub = prob.control_bounds
+
+    # @assert size(unique(xb.lb)) == (1,)
+    # @assert size(unique(xb.ub)) == (1,)
+    # @assert size(unique(ub.lb)) == (1,)
+    # @assert size(unique(ub.ub)) == (1,)
 
     
-#     exprs = ode_constraint_exprs(M, dynamics, n, δ)
-
-#     vars = Dict()
-#     for i in 1:2, j in 1:n + 1
-#         vars[Meta.parse("x[$i, $j]")] = x[i, j]
-#         vars[Meta.parse("v[$j]")] = v[j]
-#         vars[Meta.parse("θ[$j]")] = θ[j]
-#     end
-
-
-#     spliced_exprs = substitute_args.(exprs, Ref(vars))
-
-#     for expr in spliced_exprs
-#         add_NL_constraint(model, expr)
-#     end
-
-#     optimize!(model)
+    model = Model(Ipopt.Optimizer)
     
-#     x_sol = value.(x)
-#     θ_sol = value.(θ)
-#     v_sol = value.(v)
+    @variable model xb.lb <= X[1:prob.n_states, 1:n + 1] <= xb.ub base_name = "states"
+    # @variable model x[1:2, 1:n + 1] base_name = "position"
+    
+    @variable model ub.lb <= U[1:prob.n_controls, 1:n + 1] <= ub.ub base_name = "controls"
 
-#     cost_sol = cost(x_sol, θ_sol, v_sol)
+    @objective model Min prob.cost(X, U)
+    @constraint model collision 0 .<= prob.path_constraints(X, U)
+    @constraint model initial_point X[:, 1] .== prob.end_points[1]
+    @constraint model end_point X[:, end] .== prob.end_points[2]
+    
+    exprs = ode_constraint_exprs(M, prob.dynamics, n, prob.δ, prob.n_states, prob.n_controls)
 
-#     x_sol, θ_sol, v_sol, cost_sol, model, τ
-# end
+    vars = Dict()
+    for (is, ic) in zip(1:prob.n_states, 1:prob.n_controls), j in 1:n + 1
+        vars[Meta.parse("X[$is, $j]")] = X[is, j]
+        vars[Meta.parse("U[$ic, $j]")] = U[ic, j]
+    end
+
+    spliced_exprs = substitute_args.(exprs, Ref(vars))
+
+    for expr in spliced_exprs
+        add_NL_constraint(model, expr)
+    end
+
+    optimize!(model)
+    
+    X_sol = value.(X)
+    U_sol = value.(U)
+
+    cost_sol = prob.cost(X_sol, U_sol)
+
+    X_sol, U_sol, cost_sol, model, τ
+end
