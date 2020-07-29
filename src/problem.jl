@@ -102,6 +102,9 @@ function ode_constraint_exprs(M, dynamics, n, δ, ns, nc)
     Meta.parse.(strs)
 end
 
+arr2d_to_arrlist(arr) = getindex.(Ref(arr), :, 1:size(arr)[2])
+arrlist_to_arr2d(arr) = hcat(arr...)
+
 function build_problem(prob::UninitializedProblem)
     n = prob.n
     τ, w = gausslobatto(n + 1)
@@ -111,26 +114,21 @@ function build_problem(prob::UninitializedProblem)
 
     xb = prob.state_bounds
     ub = prob.control_bounds
+    broadcast_dynamics(X, U) = arrlist_to_arr2d(prob.dynamics.(arr2d_to_arrlist.([X, U])...))
+    exprs = ode_constraint_exprs(M, broadcast_dynamics, n, prob.δ, prob.n_states, prob.n_controls)
 
-    # @assert size(unique(xb.lb)) == (1,)
-    # @assert size(unique(xb.ub)) == (1,)
-    # @assert size(unique(ub.lb)) == (1,)
-    # @assert size(unique(ub.ub)) == (1,)
-
-    
     model = Model(Ipopt.Optimizer)
     
-    @variable model xb.lb <= X[1:prob.n_states, 1:n + 1] <= xb.ub base_name = "states"
-    # @variable model x[1:2, 1:n + 1] base_name = "position"
-    
-    @variable model ub.lb <= U[1:prob.n_controls, 1:n + 1] <= ub.ub base_name = "controls"
+    @variables model begin
+        xb.lb[i] <= X[i=1:prob.n_states, 1:n + 1] <= xb.ub[i], (base_name = "X$i")
+        ub.lb[i] <= U[i=1:prob.n_controls, 1:n + 1] <= ub.ub[i], (base_name = "U$i")
+    end
 
     @objective model Min prob.cost(X, U)
-    @constraint model collision 0 .<= prob.path_constraints(X, U)
+    @constraint model path_constraints 0 .<= prob.path_constraints(X, U)
     @constraint model initial_point X[:, 1] .== prob.end_points[1]
     @constraint model end_point X[:, end] .== prob.end_points[2]
     
-    exprs = ode_constraint_exprs(M, prob.dynamics, n, prob.δ, prob.n_states, prob.n_controls)
 
     vars = Dict()
     for (is, ic) in zip(1:prob.n_states, 1:prob.n_controls), j in 1:n + 1

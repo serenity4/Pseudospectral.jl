@@ -5,10 +5,16 @@ using Plots
 using FastGaussQuadrature
 
 
+const M = zeros(n + 1, n + 1) ; diff_matrix!(M, n)
+const w = gausslobatto(n + 1)[2]
+
+function cost(X, U)
+    integrand = w .* ((M * U[2, :]).^2)# .+ 0.01 .* (M * U[1, :]).^2)
+    sum(integrand)
+end
 
 function dynamics(X, U)
-    res = @. [sin(U[1, :]) * U[2, :], cos(U[1, :]) * U[2, :]]
-    transpose(hcat(res...))
+    [cos(U[1]) * U[2], sin(U[1]) * U[2]]
 end
 
 function path_constraints(X, U)
@@ -22,6 +28,8 @@ function circle_shape(radius; origin=(0., 0.), n=50)
 end
 
 n = 50
+
+# TODO: allow for non-uniform bounds
 prob = UninitializedProblem(
     dynamics,
     path_constraints,
@@ -30,25 +38,18 @@ prob = UninitializedProblem(
     2,
     n,
     1e-6,
-    # Bounds([0., 0.], [2., 2.]),
-    # Bounds([0., 0.], [2pi, 2pi]),
-    Bounds(0., 2.),
-    Bounds(0, 2.),
+    Bounds([0., 0.], [2., 2.]),
+    Bounds([0, 0], [2pi, 2.]),
     ([0., 0.], [2., 2.])
 )
 
-const M = zeros(n + 1, n + 1) ; diff_matrix!(M, n)
-const w = gausslobatto(n + 1)[2]
-function cost(X, U)
-    sum(w .* (M * U[1]).^2 + 0.1 * (M * (U[1] .- pi / 4).^2))
-end
 
-X, U, final_cost, model, τ = build_problem(prob);
+X, U, final_cost, model, τ = Pseudospectral.build_problem(prob);
 p = plot(X[1, :], X[2, :], marker_z=τ, marker=:o)
 plot!(p, circle_shape(0.6, origin=(1., 1.))..., label="obstacle")
 savefig(p, "res.png")
-scatter(τ, θ, marker_z=τ)
-scatter(τ, v, marker_z=τ)
+scatter(τ, U[1, :], marker_z=τ, title="θ")
+scatter(τ, U[2, :], marker_z=τ, title="v")
 
 termination_status(model)
 # primal_status(model)
@@ -58,11 +59,18 @@ termination_status(model)
 using DataInterpolations
 
 
-lag_x, lag_y = LagrangeInterpolation.([x[1, :], x[2, :]], Ref(τ), Ref(n))
+function reconstruct(X, τ; step=0.01)
+    map.(LagrangeInterpolation.([X[1, :], X[2, :], τ], Ref(τ), Ref(length(τ) - 1)), Ref(-1:step:1))
+end
+
+lag_x, lag_y = LagrangeInterpolation.([X[1, :], X[2, :]], Ref(τ), Ref(n))
 lag_τ = LagrangeInterpolation(τ, τ)
 
 
-plot(x[1, :], x[2, :], marker_z=lag_τ, marker=:o)
-scatter(x[1, :], x[2, :], marker_z=τ)
-# scatter(lag_x, lag_y, marker_z = lag_τ)
+plot(X[1, :], X[2, :], marker_z=lag_τ, marker=:o)
+scatter(X[1, :], X[2, :], marker_z=τ)
+τ_subsampled = -1:0.01:1
+
+xs, ys, ts = reconstruct(X, τ)
+scatter(xs, ys, marker_z=ts)
 
