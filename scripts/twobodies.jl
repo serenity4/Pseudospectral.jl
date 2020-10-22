@@ -4,7 +4,10 @@ using Pseudospectral
 using Plots
 using FastGaussQuadrature
 
+moi = JuMP.MathOptInterface
 
+
+n = 50
 const M = zeros(n + 1, n + 1) ; diff_matrix!(M, n)
 const w = gausslobatto(n + 1)[2]
 
@@ -27,7 +30,6 @@ function circle_shape(radius; origin=(0., 0.), n=50)
     origin[1] .+ xs, origin[2] .+ ys
 end
 
-n = 50
 
 # TODO: allow for non-uniform bounds
 prob = UninitializedProblem(
@@ -51,9 +53,11 @@ savefig(p, "res.png")
 scatter(τ, U[1, :], marker_z=τ, title="θ")
 scatter(τ, U[2, :], marker_z=τ, title="v")
 
-termination_status(model)
-# primal_status(model)
-# dual_status(model)
+
+
+@assert (tstatus = termination_status(model); status ∈ [moi.LOCALLY_SOLVED, moi.OPTIMAL]) "Problem not solved ($status)"
+@assert (pstatus = primal_status(model); pstatus == moi.FEASIBLE_POINT) "Non-feasible solution (primal - $(pstatus))"
+@assert (dstatus = dual_status(model); dstatus == moi.FEASIBLE_POINT) "Non-feasible solution (dual - $(dstatus))"
 
 
 using DataInterpolations
@@ -66,8 +70,11 @@ end
 lag_x, lag_y = LagrangeInterpolation.([X[1, :], X[2, :]], Ref(τ), Ref(n))
 lag_τ = LagrangeInterpolation(τ, τ)
 
+@assert (ext=extrema(lag_τ); ext == (-1, 1)) "Interpolated time is not within [-1, 1] ($(extrema(lag_τ)))"
+@assert all(sort(lag_τ) .== lag_τ) "Interpolated time is not monotone ($(lag_y))"
 
-plot(X[1, :], X[2, :], marker_z=lag_τ, marker=:o)
+p = plot(X[1, :], X[2, :], marker_z=lag_τ, marker=:o)
+plot!(p, circle_shape(0.6, origin=(1., 1.))..., label="obstacle")
 scatter(X[1, :], X[2, :], marker_z=τ)
 τ_subsampled = -1:0.01:1
 
